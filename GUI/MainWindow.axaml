@@ -1,0 +1,39 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PushToMute.GUI.MainWindow"
+        Title="Homey + Discord RPC" Width="880" Height="640" MinWidth="700" MinHeight="540">
+  <Grid Margin="16" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,*" RowSpacing="12">
+    <StackPanel Orientation="Horizontal" Spacing="10">
+      <Button x:Name="StartButton" Content="Start HTTP" Click="Start_Click" MinWidth="105" />
+      <Button x:Name="StopButton" Content="Stop HTTP" Click="Stop_Click" MinWidth="105" IsEnabled="False" />
+      <TextBlock x:Name="StatusText" Text="HTTP stopped" VerticalAlignment="Center" Margin="12,0,0,0" />
+    </StackPanel>
+    <TextBlock Grid.Row="1" Text="Homey: GET http://YOUR-PC-IP:5050/hello" FontFamily="monospace" />
+    <Grid Grid.Row="2" ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="Application ID" VerticalAlignment="Center" />
+      <TextBox x:Name="DiscordClientIdBox" Grid.Row="0" Grid.Column="1" Watermark="Discord Application ID" />
+      <TextBlock Grid.Row="1" Grid.Column="0" Text="Client Secret" VerticalAlignment="Center" />
+      <TextBox x:Name="DiscordClientSecretBox" Grid.Row="1" Grid.Column="1" PasswordChar="●" Watermark="Stored securely in keyring after first authorization" />
+      <TextBlock Grid.Row="2" Grid.Column="0" Text="Redirect URI" VerticalAlignment="Center" />
+      <TextBox x:Name="DiscordRedirectUriBox" Grid.Row="2" Grid.Column="1" Text="http://localhost" />
+    </Grid>
+    <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="10">
+      <Button x:Name="DiscordConnectButton" Content="Connect Discord" Click="DiscordConnect_Click" />
+      <Button x:Name="DiscordAuthorizeButton" Content="Authorize Discord" Click="DiscordAuthorize_Click" IsEnabled="False" />
+      <Button x:Name="DiscordDisconnectButton" Content="Disconnect" Click="DiscordDisconnect_Click" IsEnabled="False" />
+      <TextBlock x:Name="DiscordStatusText" Text="Disconnected" VerticalAlignment="Center" Margin="10,0,0,0" />
+    </StackPanel>
+    <Grid Grid.Row="4" ColumnDefinitions="Auto,*" ColumnSpacing="10">
+      <TextBlock Grid.Column="0" Text="Target User ID" VerticalAlignment="Center" />
+      <TextBox x:Name="DiscordTargetUserIdBox" Grid.Column="1" Watermark="Right-click user in Discord → Copy User ID" />
+    </Grid>
+    <StackPanel Grid.Row="5" Orientation="Horizontal" Spacing="10">
+      <Button x:Name="MuteButton" Content="Mute User" Click="Mute_Click" IsEnabled="False" />
+      <Button x:Name="UnmuteButton" Content="Unmute User" Click="Unmute_Click" IsEnabled="False" />
+      <Button x:Name="ToggleButton" Content="Toggle Mute" Click="Toggle_Click" IsEnabled="False" />
+    </StackPanel>
+    <TextBlock Grid.Row="6" Text="Homey: /discord/mute, /discord/unmute, /discord/toggle (uses Target User ID). Or /discord/mute/{userId}, etc." TextWrapping="Wrap" FontFamily="monospace" />
+    <TextBox x:Name="StatusMessageBox" Grid.Row="7" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+             ScrollViewer.VerticalScrollBarVisibility="Auto" />
+  </Grid>
+</Window>
