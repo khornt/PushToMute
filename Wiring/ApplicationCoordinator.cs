@@ -5,14 +5,13 @@ namespace PushToMute.Wiring;
 // Composition root: owns transports, passes business operations to GUI and HTTP adapter.
 internal sealed class ApplicationCoordinator : IAsyncDisposable
 {
-    private readonly DiscordRpcClient _discord = new();
-    private readonly DiscordCredentialsStore _credentials = new();
+    private readonly DiscordCredentialsStore _credentials;
+    private readonly DiscordRpcClient _discord;
     private readonly VoiceControlService _voice;
     private readonly HomeyHttpServer _http;
     private readonly Action<string> _log;
-    private readonly DiscordEventBroker? _eventBroker;
-  //  private readonly DiscordGatewayClient? _gateway;
-    private readonly HomeyWebhookDestination? _homeyDestination;
+    private readonly DiscordEventBroker _eventBroker;
+    private readonly HomeyWebhookDestination _homeyDestination;
     public event Action? StatusChanged;
     public bool HttpRunning => _http.Running;
     public bool DiscordConnected => _discord.Connected;
@@ -21,6 +20,8 @@ internal sealed class ApplicationCoordinator : IAsyncDisposable
     public ApplicationCoordinator(Func<string> selectedUserId, Action<string> log)
     {
         _log = log;
+        _credentials = new DiscordCredentialsStore();
+        _discord = new DiscordRpcClient(_credentials);
         _voice = new VoiceControlService(_discord);
         _http = new HomeyHttpServer(_voice, selectedUserId, log);
         
@@ -28,29 +29,21 @@ internal sealed class ApplicationCoordinator : IAsyncDisposable
         _discord.StatusChanged += OnDiscordStatusChanged;
 
         
-        string homeyUrl = Environment.GetEnvironmentVariable(
-            "PUSHTOMUTE_HOMEY_URL") ?? "http://192.168.50.110";
+        string homeyUrl = Environment.GetEnvironmentVariable("PUSHTOMUTE_HOMEY_URL")
+            ?? "http://192.168.50.110";
 
-        _homeyDestination = new HomeyWebhookDestination(homeyUrl);
-
+        _homeyDestination = new HomeyWebhookDestination(homeyUrl, ShowStatusMessage);
         _eventBroker = new DiscordEventBroker(
-            [_homeyDestination],
+            new IDiscordEventDestination[] { _homeyDestination },
             ShowStatusMessage);
 
         _discord.IpcEventReceived += OnDiscordIpcEvent;
-        
-
-        ShowStatusMessage("Discord IPC event monitoring configured.");
+        ShowStatusMessage("Discord IPC event listener configured.");
     }
 
     private void OnDiscordStatusChanged()
     {
         StatusChanged?.Invoke();
-    }
-
-    private void OnDiscordVoiceEvent(DiscordVoiceEvent discordEvent)
-    {
-        _eventBroker?.TryPublish(discordEvent);
     }
 
     private void ShowStatusMessage(string message)
@@ -97,19 +90,118 @@ internal sealed class ApplicationCoordinator : IAsyncDisposable
     }
     public async ValueTask DisposeAsync()
     {
-        if (_eventBroker is not null)
-        {
-            await _eventBroker.DisposeAsync();
-        }
-
-        _homeyDestination?.Dispose();
+        _discord.IpcEventReceived -= OnDiscordIpcEvent;
+        _discord.StatusChanged -= OnDiscordStatusChanged;
         await _http.DisposeAsync();
         await _discord.DisposeAsync();
+        await _eventBroker.DisposeAsync();
+        _homeyDestination.Dispose();
     }
     
     private void OnDiscordIpcEvent(DiscordIpcEvent discordEvent)
     {
-        ShowStatusMessage(
-            $"Discord IPC event received: {discordEvent.EventName}");
+        string eventName = discordEvent.EventName;
+        string description = DescribeDiscordIpcEvent(discordEvent);
+        ShowStatusMessage($"Discord IPC {eventName}: {description}");
+
+        PublishUserJoinedEvent(discordEvent);
+    }
+
+    
+    private void PublishUserJoinedEvent(DiscordIpcEvent ipcEvent)
+    {
+        bool recognized =
+            DiscordIpcVoiceEventAdapter.TryCreateUserJoinedEvent(
+                ipcEvent,
+                out DiscordVoiceEvent? voiceEvent);
+
+        if (!recognized || voiceEvent is null)
+        {
+            return;
+        }
+
+        bool accepted = _eventBroker.TryPublish(voiceEvent);
+
+        if (!accepted)
+        {
+            ShowStatusMessage(
+                $"Could not queue User Joined event for {voiceEvent.DisplayName}.");
+
+            return;
+        }
+
+        string message =
+            $"Queued User Joined event: {voiceEvent.DisplayName} " +
+            $"({voiceEvent.UserId}).";
+
+        ShowStatusMessage(message);
+    }
+    
+    private static string DescribeDiscordIpcEvent(
+        DiscordIpcEvent discordEvent)
+    {
+        System.Text.Json.JsonElement data = discordEvent.Data;
+
+        if (discordEvent.EventName == "VOICE_CHANNEL_SELECT")
+        {
+            string? channelId = ReadStringProperty(
+                data,
+                "channel_id");
+
+            if (string.IsNullOrWhiteSpace(channelId))
+            {
+                return "Disconnected from voice";
+            }
+
+            return $"Selected channel {channelId}";
+        }
+
+        if (discordEvent.EventName.StartsWith(
+                "VOICE_STATE_",
+                StringComparison.Ordinal))
+        {
+            string? userId = ReadStringProperty(data, "user_id");
+            string? userName = null;
+            string? nickname = ReadStringProperty(data, "nick");
+
+            if (data.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                data.TryGetProperty("user", out System.Text.Json.JsonElement user))
+            {
+                userId ??= ReadStringProperty(user, "id");
+                userName = ReadStringProperty(user, "username");
+            }
+
+            string displayName = nickname
+                                 ?? userName
+                                 ?? userId
+                                 ?? "unknown";
+
+            return $"User {displayName} ({userId ?? "unknown"})";
+        }
+
+        return data.ToString();
+    }
+
+
+    private static string? ReadStringProperty(
+        System.Text.Json.JsonElement element,
+        string name)
+    {
+        if (element.ValueKind != System.Text.Json.JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (!element.TryGetProperty(name, out System.Text.Json.JsonElement value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind != System.Text.Json.JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return value.GetString();
     }
 }

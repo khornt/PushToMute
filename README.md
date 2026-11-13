@@ -38,7 +38,7 @@ Preconfigured Discord User
 (Local Voice Mute)
 ```
 
-PushToMute runs a lightweight HTTP server that receives commands from a smart home hub and communicates with Discord to control the configured user's server mute state.
+PushToMute runs a lightweight HTTP server that receives commands from a smart home hub and communicates with Discord to control the configured user's local mute state.
 
 ## HTTP Integration
 
@@ -68,7 +68,7 @@ Any compatible hub or automation platform can trigger these endpoints.
 4. Start PushToMute.
 5. Select the Discord user to control.
 
-The local mute feature uses authenticated desktop RPC; no bot permission is required for it. The optional voice-event monitor uses a separate bot connection.
+The local mute feature uses authenticated desktop RPC; no bot permission is required for it. The IPC event monitor uses the same desktop RPC connection.
 
 ## Technology
 
@@ -101,51 +101,80 @@ HTTPS and request authentication are recommended when communicating across untru
 
 License information has not yet been specified.
 
-## Discord voice events → Homey (new)
+## Local Discord IPC event listener (current baseline)
 
-This feature is **separate from the existing local Discord RPC connection**. The
-RPC `ReadLoopAsync` and pending-command nonce matching remain unchanged. A second,
-bot-authenticated Discord **Gateway WebSocket** observes server voice states.
+This build uses **only local Discord IPC**. No bot token or Discord Gateway connection
+is required. Bot-era `DiscordEventBroker`, `DiscordVoiceEvent` and
+`HomeyWebhookDestination` source types remain for possible later work, but are **not
+instantiated** and do not send any outgoing webhooks in this version.
 
-Configure these environment variables before launching Rider or `dotnet run`:
+After a successful interactive or restored OAuth `AUTHENTICATE`, the RPC client:
 
-```fish
-set -x PUSHTOMUTE_DISCORD_BOT_TOKEN 'YOUR_BOT_TOKEN'
-set -x PUSHTOMUTE_GUILD_ID 'YOUR_SERVER_ID'
-set -x PUSHTOMUTE_HOMEY_URL 'http://192.168.50.110'
-dotnet run
+1. Sends `SUBSCRIBE` with the top-level `evt: VOICE_CHANNEL_SELECT`.
+2. Calls `GET_SELECTED_VOICE_CHANNEL` to find the initially selected channel.
+3. For a selected channel, subscribes to `VOICE_STATE_CREATE`,
+   `VOICE_STATE_DELETE`, and `VOICE_STATE_UPDATE` with `args.channel_id`.
+4. On `VOICE_CHANNEL_SELECT`, queues a change, unsubscribes from the old voice
+   channel and subscribes to the new one. It does **not** await subscriptions from
+   within the receive loop; that would deadlock its nonce-based response reader.
+
+The existing nonce/`TaskCompletionSource` command-response path is preserved.
+Unsolicited `DISPATCH` packets are forwarded through `IpcEventReceived` and
+shown in the Avalonia status window. Subscription errors are shown there too.
+
+**Test:** connect/authenticate Discord, join or change a voice channel, and
+check for `Subscribed to VOICE_CHANNEL_SELECT`, `Listening for voice-state events
+in channel ...`, and `Discord IPC VOICE_CHANNEL_SELECT`. Then ask another user
+to join/leave the same voice channel and look for `VOICE_STATE_CREATE/DELETE`.
+
+**Scope:** This monitors your own selected channel, not every channel in a
+server. Some RPC subscription commands may be rejected depending on client
+support or granted scopes (`rpc`, `identify` are already used by this project).
+There is no automatic reauthorization or webhook delivery added here.
+
+
+## Layered refactor (2026-11-13)
+
+This baseline preserves the proven local IPC voice events and command response reader.
+No Discord bot or Gateway connection has been added.
+
+- `GUI/` — Avalonia views and status output.
+- `Logic/` — voice use case and interfaces.
+- `Wiring/ApplicationCoordinator.cs` — composition root; creates shared credentials store and RPC client.
+- `Wiring/DiscordRpcClient.cs` — IPC connection, nonce/TaskCompletionSource correlation, incoming dispatch, session lifetime.
+- `Wiring/DiscordAuthenticationService.cs` — OAuth code exchange, refresh, credential persistence and RPC authentication.
+- `Wiring/DiscordCredentialsStore.cs` — Linux Secret Service and non-secret application settings.
+- `Wiring/DiscordVoiceSubscriptionService.cs` — channel-selection worker and voice-state subscriptions.
+- `Wiring/DiscordVoiceCommandService.cs` — mute/unmute/toggle and response interpretation.
+- `Wiring/DiscordIpcFraming.cs` — frame serialization and parsing.
+- `Wiring/Dto/` — request DTOs and internal credential/token models.
+
+`DiscordRpcClient` keeps the same externally used methods and events. The coordinator
+injects the same `DiscordCredentialsStore` instance used for its settings and by the OAuth service.
+The authentication/subscription/voice classes receive narrow delegates for sending RPC commands,
+which preserves the single command dispatcher and persistent IPC reader.
+
+**Smoke test on CachyOS:** `dotnet build`, start the GUI, verify token restore, mute/unmute/toggle,
+change Discord voice channels, and confirm both subscription status and `VOICE_STATE_*` events.
+
+This refactor was statically reviewed but not compiled here: the environment has no .NET SDK.
+
+## User Joined → Homey webhook dry run
+
+The local IPC listener now converts `VOICE_STATE_CREATE` into a `DiscordVoiceEventType.Joined`
+event. `ApplicationCoordinator` publishes this to the existing bounded `DiscordEventBroker`.
+The broker invokes `HomeyWebhookDestination`, which **only writes the intended URL to the
+Avalonia status output**. The actual HTTP GET and response check are commented out in
+`Wiring/HomeyWebhookDestination.cs`.
+
+For a participant joining the selected voice channel, look for status lines like:
+
+```
+Queued User Joined event for 123456789012345678.
+Homey webhook (dry run): http://192.168.50.110/webhook?event=discord_voice_joined&tag=123456789012345678
 ```
 
-Avoid saving your bot token in project files or committing it to Git. For persistent
-use, retrieve it from a secret store and inject it at launch. The bot must be
-installed in the intended server. The Gateway uses the standard `GUILDS` and
-`GUILD_VOICE_STATES` intents; it does **not** require Message Content intent or
-reading chat messages.
+Optionally set `PUSHTOMUTE_HOMEY_URL` to override the Homey base URL. No bot token
+is required. This is *selected-channel IPC monitoring*, not server-wide monitoring.
 
-Create three Homey Flows with these Logic webhook event names:
-
-| Homey webhook event | Meaning | `tag` |
-|---|---|---|
-| `discord_voice_joined` | User entered a voice channel from no channel | Discord user ID |
-| `discord_voice_left` | User left voice | Discord user ID |
-| `discord_voice_moved` | User changed voice channels | Discord user ID |
-
-For Homey Pro 2023+ the destination uses
-`GET http://HOMEY-IP/webhook?event=...&tag=...`. The broker currently sends a
-separate request for each detected event; user IDs are sent as the tag. It logs
-delivery failures without blocking the Discord receive loop. The queue is bounded
-(256 events); it can drop events under sustained overload. Events aren't persisted
-or retried after application shutdown.
-
-The bot's startup voice-state snapshot populates the current state without
-emitting fake joins. After a reconnect the snapshot is refreshed; voice changes
-that occurred while disconnected cannot be reconstructed. This first implementation
-uses a fresh Gateway Identify after reconnect, rather than session Resume.
-
-**Note:** Existing HTTP GET command endpoints on port 5050 are independent of this
-outbound webhook feature. The bot listener starts automatically if configured;
-Homey's outbound event deliveries do not require starting Kestrel.
-
-**Known correction:** The older README text referring to a "server mute" is
-inaccurate for the existing desktop IPC commands: those commands mute *locally*
-for the logged-in desktop user, not the entire server.
+Once ready, uncomment the HTTP request lines in `HomeyWebhookDestination.DeliverAsync`.
