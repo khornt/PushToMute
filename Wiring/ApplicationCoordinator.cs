@@ -10,6 +10,9 @@ internal sealed class ApplicationCoordinator : IAsyncDisposable
     private readonly VoiceControlService _voice;
     private readonly HomeyHttpServer _http;
     private readonly Action<string> _log;
+    private readonly DiscordEventBroker? _eventBroker;
+  //  private readonly DiscordGatewayClient? _gateway;
+    private readonly HomeyWebhookDestination? _homeyDestination;
     public event Action? StatusChanged;
     public bool HttpRunning => _http.Running;
     public bool DiscordConnected => _discord.Connected;
@@ -22,7 +25,37 @@ internal sealed class ApplicationCoordinator : IAsyncDisposable
         _http = new HomeyHttpServer(_voice, selectedUserId, log);
         
         _discord.Message += log;
-        _discord.StatusChanged += () => StatusChanged?.Invoke();
+        _discord.StatusChanged += OnDiscordStatusChanged;
+
+        
+        string homeyUrl = Environment.GetEnvironmentVariable(
+            "PUSHTOMUTE_HOMEY_URL") ?? "http://192.168.50.110";
+
+        _homeyDestination = new HomeyWebhookDestination(homeyUrl);
+
+        _eventBroker = new DiscordEventBroker(
+            [_homeyDestination],
+            ShowStatusMessage);
+
+        _discord.IpcEventReceived += OnDiscordIpcEvent;
+        
+
+        ShowStatusMessage("Discord IPC event monitoring configured.");
+    }
+
+    private void OnDiscordStatusChanged()
+    {
+        StatusChanged?.Invoke();
+    }
+
+    private void OnDiscordVoiceEvent(DiscordVoiceEvent discordEvent)
+    {
+        _eventBroker?.TryPublish(discordEvent);
+    }
+
+    private void ShowStatusMessage(string message)
+    {
+        _log(message);
     }
 
     public async Task StartHttpAsync() { 
@@ -64,7 +97,19 @@ internal sealed class ApplicationCoordinator : IAsyncDisposable
     }
     public async ValueTask DisposeAsync()
     {
+        if (_eventBroker is not null)
+        {
+            await _eventBroker.DisposeAsync();
+        }
+
+        _homeyDestination?.Dispose();
         await _http.DisposeAsync();
         await _discord.DisposeAsync();
+    }
+    
+    private void OnDiscordIpcEvent(DiscordIpcEvent discordEvent)
+    {
+        ShowStatusMessage(
+            $"Discord IPC event received: {discordEvent.EventName}");
     }
 }

@@ -24,6 +24,8 @@ internal sealed class DiscordRpcClient : IDiscordVoiceGateway, IAsyncDisposable
 
     public event Action<string>? Message;
     public event Action? StatusChanged;
+    
+    public event Action<DiscordIpcEvent>? IpcEventReceived;
 
     public async Task ConnectAsync(string clientId, CancellationToken cancellationToken)
     {
@@ -656,25 +658,154 @@ internal sealed class DiscordRpcClient : IDiscordVoiceGateway, IAsyncDisposable
             _sendLock.Release();
         }
     }
-
+    
     private void ProcessRpcPacket(JsonElement packet)
     {
-        if (packet.TryGetProperty("nonce", out JsonElement nonceElement) &&
-            nonceElement.ValueKind == JsonValueKind.String)
+        if (TryCompletePendingCommand(packet))
         {
-            string? nonce = nonceElement.GetString();
-            if (nonce is not null && _pending.TryRemove(nonce, out TaskCompletionSource<JsonElement>? pending))
-            {
-                pending.TrySetResult(packet.Clone());
-                return;
-            }
+            return;
         }
 
-        if (packet.TryGetProperty("evt", out JsonElement evt) && evt.GetString() == "ERROR")
+        if (TryHandleRpcError(packet))
         {
-            Message?.Invoke("Discord RPC event error: " + packet.GetProperty("data"));
+            return;
         }
+
+        HandleDiscordEvent(packet);
     }
+    
+    private bool TryCompletePendingCommand(JsonElement packet)
+    {
+        if (!packet.TryGetProperty("nonce", out JsonElement nonceElement))
+        {
+            return false;
+        }
+
+        if (nonceElement.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        string? nonce = nonceElement.GetString();
+
+        if (string.IsNullOrEmpty(nonce))
+        {
+            return false;
+        }
+
+        if (!_pending.TryRemove(
+                nonce,
+                out TaskCompletionSource<JsonElement>? pending))
+        {
+            return false;
+        }
+
+        pending.TrySetResult(packet.Clone());
+
+        return true;
+    }
+    
+    private bool TryHandleRpcError(JsonElement packet)
+    {
+        if (!packet.TryGetProperty("evt", out JsonElement eventElement))
+        {
+            return false;
+        }
+
+        if (eventElement.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        string? eventName = eventElement.GetString();
+
+        if (eventName != "ERROR")
+        {
+            return false;
+        }
+
+        string errorMessage = packet.ToString();
+
+        if (packet.TryGetProperty("data", out JsonElement dataElement))
+        {
+            errorMessage = dataElement.ToString();
+        }
+
+        Message?.Invoke($"Discord RPC event error: {errorMessage}");
+
+        return true;
+    }
+    
+    private void HandleDiscordEvent(JsonElement packet)
+    {
+        if (!packet.TryGetProperty("cmd", out JsonElement commandElement))
+        {
+            return;
+        }
+
+        if (commandElement.ValueKind != JsonValueKind.String)
+        {
+            return;
+        }
+
+        string? command = commandElement.GetString();
+
+        if (command != "DISPATCH")
+        {
+            return;
+        }
+
+        if (!packet.TryGetProperty("evt", out JsonElement eventElement))
+        {
+            return;
+        }
+
+        if (eventElement.ValueKind != JsonValueKind.String)
+        {
+            return;
+        }
+
+        string? eventName = eventElement.GetString();
+
+        if (string.IsNullOrWhiteSpace(eventName))
+        {
+            return;
+        }
+
+        if (!packet.TryGetProperty("data", out JsonElement dataElement))
+        {
+            return;
+        }
+
+        DiscordIpcEvent discordEvent = new()
+        {
+            EventName = eventName,
+            Data = dataElement.Clone()
+        };
+
+        IpcEventReceived?.Invoke(discordEvent);
+    }
+
+    // private void ProcessRpcPacket(JsonElement packet)
+    // {
+    //     if (packet.TryGetProperty("nonce", out JsonElement nonceElement) &&
+    //         nonceElement.ValueKind == JsonValueKind.String)
+    //     {
+    //         string? nonce = nonceElement.GetString();
+    //         if (nonce is not null && _pending.TryRemove(nonce, out TaskCompletionSource<JsonElement>? pending))
+    //         {
+    //             pending.TrySetResult(packet.Clone());
+    //             return;
+    //         }
+    //     }
+    //
+    //     if (packet.TryGetProperty("evt", out JsonElement evt) && evt.GetString() == "ERROR")
+    //     {
+    //         Message?.Invoke("Discord RPC event error: " + packet.GetProperty("data"));
+    //     }
+    //     
+    //     HandleDiscordEvent(packet);
+    // }
 
     private static async Task WriteFrameAsync(
         NetworkStream stream,
